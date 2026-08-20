@@ -10,7 +10,7 @@ android {
         applicationId = "com.codex.bf66display"
         minSdk = 23
         targetSdk = 35
-        versionCode = 4
-        versionName = "2.3"
+        versionCode = 5
+        versionName = "2.4"
     }
 }

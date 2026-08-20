@@ -32,3 +32,8 @@ Thumbs.db
 *.log
 *.tmp
 *.temp
+
+# Local lyrics and generated lyric cache
+*.krc
+*.lrc
+**/Lyrics/Cache/

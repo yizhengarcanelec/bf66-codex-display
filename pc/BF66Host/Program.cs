@@ -21,7 +21,10 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         var args = Environment.GetCommandLineArgs().Skip(1).ToArray();
         var startupImage = args.FirstOrDefault(File.Exists);
-        Application.Run(new MainForm(args.Any(x => x.Equals("--landscape", StringComparison.OrdinalIgnoreCase)), startupImage));
+        Application.Run(new MainForm(
+            args.Any(x => x.Equals("--landscape", StringComparison.OrdinalIgnoreCase)),
+            startupImage,
+            args.Any(x => x.Equals("--music", StringComparison.OrdinalIgnoreCase))));
     }
 }
 
@@ -37,12 +40,13 @@ internal sealed record DisplayState(
     string ImageFit,
     bool HasImage,
     UsageSnapshot? Usage,
+    MusicSnapshot? Music,
     long Version);
 
 internal sealed class StateStore
 {
     private readonly object _gate = new();
-    private DisplayState _state = new("custom", "portrait", "BF66 显示屏", "已连接电脑控制端", "#081525", "#F4F8FF", 42, true, "contain", false, null, 1);
+    private DisplayState _state = new("custom", "portrait", "BF66 显示屏", "已连接电脑控制端", "#081525", "#F4F8FF", 42, true, "contain", false, null, null, 1);
     private string? _imagePath;
 
     public DisplayState Get()
@@ -73,6 +77,7 @@ internal sealed class StateStore
                 imageFit,
                 hasImage,
                 _state.Usage,
+                _state.Music,
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         }
     }
@@ -80,7 +85,13 @@ internal sealed class StateStore
     public void UpdateUsage(UsageSnapshot usage)
     {
         lock (_gate)
-            _state = _state with { Usage = usage };
+            _state = _state with { Usage = usage, Version = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+    }
+
+    public void UpdateMusic(MusicSnapshot music)
+    {
+        lock (_gate)
+            _state = _state with { Music = music, Version = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
     }
 }
 
@@ -168,6 +179,30 @@ internal sealed class DisplayServer : IAsyncDisposable
             _tracker.Mark(context);
             return Results.Json(_store.Get());
         });
+        _app.MapGet("/music-cover", (HttpContext context) =>
+        {
+            if (!Authorized(context)) return Results.Unauthorized();
+            _tracker.Mark(context);
+            return MusicReader.TryGetCover(out var cover) && cover is not null
+                ? Results.File(cover.Bytes, cover.ContentType, enableRangeProcessing: false)
+                : Results.NotFound();
+        });
+        _app.MapPost("/api/music/{command}", async (HttpContext context, string command) =>
+        {
+            if (!Authorized(context)) return Results.Unauthorized();
+            _tracker.Mark(context);
+            if (command is not ("toggle" or "previous" or "next")) return Results.BadRequest();
+            var accepted = await MusicReader.ExecuteAsync(command);
+            return accepted ? Results.Ok() : Results.StatusCode(StatusCodes.Status409Conflict);
+        });
+        _app.MapPost("/api/music/seek", async (HttpContext context) =>
+        {
+            if (!Authorized(context)) return Results.Unauthorized();
+            _tracker.Mark(context);
+            if (!long.TryParse(context.Request.Query["positionMs"], out var positionMs) || positionMs < 0) return Results.BadRequest();
+            var accepted = await MusicReader.SeekAsync(positionMs);
+            return accepted ? Results.Ok() : Results.StatusCode(StatusCodes.Status409Conflict);
+        });
         _app.MapGet("/media", (HttpContext context) =>
         {
             if (!Authorized(context)) return Results.Unauthorized();
@@ -250,6 +285,7 @@ internal sealed class DisplayServer : IAsyncDisposable
 .breakdown{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin-bottom:17px}.metric{min-width:0;overflow:hidden;background:#171d27;border:1px solid #2b3442;border-radius:12px;padding:13px 9px}.metric-label{color:#7f8ca0;font-size:10px;font-weight:800;letter-spacing:.8px}.metric-value{font-size:18px;font-weight:750;margin-top:6px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .weekly{background:#171d27;border:1px solid #2b3442;border-radius:16px;padding:18px 16px 16px}.weekly-top{display:flex;align-items:flex-end}.weekly-value{margin-left:auto;color:#4ade80;font-size:35px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums}.track{height:8px;border-radius:20px;background:#29313e;margin:15px 0 13px;overflow:hidden}.fill{height:100%;width:0;border-radius:20px;background:#4ade80;transition:width .45s,background .25s}.weekly-meta{display:flex;color:#aab5c5;font-size:11px;white-space:nowrap}.reset{margin-left:auto;color:#718096}.usage-footer{margin-top:auto;display:flex;align-items:center;color:#657386;font-size:10px}.local{margin-left:auto;font-weight:800;letter-spacing:1px}
 #usage-empty{display:none;text-align:center;color:#8b98aa;font-size:22px;margin:auto}
+#music{--music-accent:#8b5cf6;position:absolute;inset:0;display:none;overflow:hidden;color:#fff;background:linear-gradient(125deg,#090a18,#171337 52%,#090e1e);font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;user-select:none}.music-aurora{position:absolute;inset:-18%;background:radial-gradient(circle at 20% 32%,var(--music-accent),transparent 34%),radial-gradient(circle at 78% 68%,#1ec8d7,transparent 38%),radial-gradient(circle at 55% 20%,#ed4b92,transparent 31%);filter:blur(35px);opacity:.46;animation:aurora 11s ease-in-out infinite alternate}.music-noise{position:absolute;inset:0;opacity:.14;background-image:radial-gradient(rgba(255,255,255,.7) .55px,transparent .7px);background-size:4px 4px;mix-blend-mode:soft-light}.music-shell{position:relative;z-index:2;height:100%;display:grid;grid-template-columns:34% 1fr;gap:4.5%;align-items:center;padding:4.4% 7%}.album-wrap{position:relative;justify-self:center;width:min(29vw,290px);aspect-ratio:1}.album-glow{position:absolute;inset:11%;border-radius:28%;background:var(--music-accent);filter:blur(35px);opacity:.75;animation:albumGlow 2.6s ease-in-out infinite}.album-card{position:absolute;inset:0;display:grid;place-items:center;overflow:hidden;border:1px solid rgba(255,255,255,.32);border-radius:13%;background:linear-gradient(140deg,rgba(255,255,255,.35),rgba(255,255,255,.07));box-shadow:0 28px 54px rgba(0,0,0,.42),inset 0 1px rgba(255,255,255,.45);backdrop-filter:blur(18px);font-size:min(13vw,118px);font-weight:900;letter-spacing:-.09em;text-shadow:0 8px 26px rgba(0,0,0,.3);transform:rotate(-4deg);transition:transform .5s,background .5s}.album-card.playing{animation:albumFloat 4s ease-in-out infinite}.album-vinyl{position:absolute;right:-8%;bottom:-5%;width:53%;aspect-ratio:1;border-radius:50%;background:repeating-radial-gradient(circle,#111 0 3px,#24242a 4px 6px);box-shadow:0 13px 24px rgba(0,0,0,.42);z-index:-1}.album-vinyl:after{content:'';position:absolute;left:42%;top:42%;width:16%;height:16%;border-radius:50%;background:var(--music-accent);border:3px solid #ded8ff}.music-main{min-width:0;display:flex;flex-direction:column;justify-content:center}.music-top{display:flex;align-items:center;gap:10px;margin-bottom:5px;color:rgba(255,255,255,.76);font-size:11px;font-weight:800;letter-spacing:1.6px}.music-live{display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border:1px solid rgba(255,255,255,.22);border-radius:99px;background:rgba(255,255,255,.12)}.music-live i{width:7px;height:7px;border-radius:50%;background:#50e3a4;box-shadow:0 0 12px #50e3a4}.music-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:clamp(25px,4.2vw,52px);font-weight:850;letter-spacing:-1.8px;line-height:1.14}.music-artist{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:7px;color:rgba(255,255,255,.72);font-size:clamp(14px,2vw,23px);font-weight:600}.music-lyrics{min-height:116px;margin:4.5% 0 2%;display:flex;flex-direction:column;justify-content:center;gap:8px;overflow:hidden}.lyric{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;font-weight:650;transition:transform .38s,opacity .38s,color .38s}.lyric.prev,.lyric.next{color:rgba(255,255,255,.36);font-size:clamp(13px,1.65vw,20px);transform:translateX(6px)}.lyric.current{color:#fff;font-size:clamp(22px,3.25vw,41px);font-weight:850;letter-spacing:-.6px;text-shadow:0 0 20px color-mix(in srgb,var(--music-accent),transparent 35%)}.music-progress{margin-top:1.5%}.progress-track{position:relative;height:6px;border-radius:99px;background:rgba(255,255,255,.2);overflow:visible}.progress-fill{position:relative;width:0;height:100%;border-radius:99px;background:linear-gradient(90deg,#fff,var(--music-accent));box-shadow:0 0 16px var(--music-accent);transition:width .25s linear}.progress-dot{position:absolute;right:-4px;top:-3px;width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 0 12px var(--music-accent)}.music-times{display:flex;justify-content:space-between;margin-top:8px;color:rgba(255,255,255,.55);font-size:11px;font-variant-numeric:tabular-nums}.music-controls{display:flex;align-items:center;gap:20px;margin-top:3.2%}.music-button{display:grid;place-items:center;width:46px;height:46px;border:0;border-radius:50%;background:rgba(255,255,255,.13);color:#fff;font-size:21px;cursor:pointer;box-shadow:inset 0 1px rgba(255,255,255,.18);-webkit-tap-highlight-color:transparent}.music-button:active{transform:scale(.9);background:rgba(255,255,255,.25)}.music-button.play{width:62px;height:62px;background:#fff;color:#17132e;font-size:25px;box-shadow:0 10px 28px color-mix(in srgb,var(--music-accent),transparent 32%)}.music-status{margin-left:auto;max-width:35%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:rgba(255,255,255,.5);font-size:10px;font-weight:700;letter-spacing:.35px}@keyframes aurora{0%{transform:translate(-2%,-3%) scale(1)}100%{transform:translate(3%,4%) scale(1.12)}}@keyframes albumFloat{0%,100%{transform:rotate(-4deg) translateY(0)}50%{transform:rotate(-1deg) translateY(-8px)}}@keyframes albumGlow{0%,100%{transform:scale(.9);opacity:.48}50%{transform:scale(1.13);opacity:.88}}
 #pet{--lamp-color:#58dca2;--lamp-glow:#3ad796;position:absolute;inset:0;display:none;overflow:hidden;touch-action:none;user-select:none;background:radial-gradient(circle at 50% 42%,#fff7e5 0,#e7dfce 44%,#9ba8c6 100%);color:#53382f}
 .pet-grid{position:absolute;inset:0;opacity:.32;background-image:radial-gradient(circle at 15% 18%,rgba(93,63,52,.16) 0 3px,transparent 4px),radial-gradient(circle at 78% 72%,rgba(93,63,52,.12) 0 4px,transparent 5px);background-size:66px 66px,92px 92px}
 .pet-halo{position:absolute;left:50%;top:60%;width:min(82vw,520px);height:min(82vw,520px);transform:translate(-50%,-50%);border-radius:50%;background:radial-gradient(circle,rgba(255,255,255,.88),rgba(255,235,198,.42) 48%,transparent 71%);filter:blur(5px);animation:miaoHalo 4.2s ease-in-out infinite}
@@ -274,9 +310,14 @@ internal sealed class DisplayServer : IAsyncDisposable
 .weekly{border-radius:13px;padding:13px 14px 11px}.weekly-value{font-size:29px}.track{height:7px;margin:10px 0 9px}.weekly-meta{font-size:9px}.usage-footer{font-size:8px}
 #pet-bubble-zone{left:4%;right:auto;top:17%;width:38%;height:55%;align-items:center}#pet-bubble{font-size:16px;padding:10px 15px}#pet-anchor{left:69%;top:52%;width:min(37vw,390px)}.pet-halo{left:69%;top:52%;width:min(48vw,430px);height:min(48vw,430px)}#pet-hint{left:47%;bottom:2.5%;font-size:11px}.pet-status{top:9px;bottom:auto}.pet-name{top:9px;bottom:auto}#pet-clock{top:13px;font-size:34px;letter-spacing:1.5px}
 }
+.album-card .album-initial{position:relative;z-index:1}.album-card img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .42s ease}.album-card.has-cover img{opacity:1}.album-card.has-cover .album-initial{opacity:0}
+.music-lyrics .lyric{position:relative;text-overflow:clip}.lyric-text{display:inline-block;min-width:max-content;will-change:transform}.progress-track{height:8px;cursor:pointer;touch-action:none;-webkit-tap-highlight-color:transparent}.progress-track:before{content:'';position:absolute;inset:-15px 0}.progress-track.dragging{background:rgba(255,255,255,.32)}.progress-track.dragging .progress-fill{transition:none}.progress-track.dragging .progress-dot{transform:scale(1.45)}
+.music-top,.music-status{display:none}.music-shell{padding:3.2% 7% 4.8%;align-items:center}.music-main{justify-content:center;max-height:91vh}.music-title{margin-top:0}.music-lyrics{min-height:102px;margin:3.1% 0 1.4%;gap:7px}.music-controls{justify-content:center;gap:24px;margin-top:2%;padding-bottom:8px}.music-button{width:43px;height:43px;font-size:19px}.music-button.play{width:56px;height:56px;font-size:23px}.music-times{margin-top:7px}
+.music-lyrics{min-height:150px;margin:2.7% 0 .8%;gap:10px}.music-title,.music-artist{transform:translateY(8px)}.music-controls{transform:translateY(8px);padding-bottom:0}
 </style></head><body><main id="root">
 <section id="custom"><img id="image-media"><div id="shade"></div><div id="clock"></div><div id="title"></div><div id="message"></div></section>
 <section id="usage"><header class="meter-head"><span class="brand-dot">●</span><span class="brand">CODEX METER</span><span class="live" id="transport">CONNECTING</span></header><div id="usage-content"><div class="hero"><div class="eyebrow">TOKENS TODAY</div><div class="hero-value" id="u-total">--</div><div class="partial" id="u-partial"></div></div><div class="breakdown"><div class="metric"><div class="metric-label">INPUT</div><div class="metric-value" id="u-input">--</div></div><div class="metric"><div class="metric-label">OUTPUT</div><div class="metric-value" id="u-output">--</div></div><div class="metric"><div class="metric-label">CACHE</div><div class="metric-value" id="u-cache">--</div></div></div><div class="weekly"><div class="weekly-top"><div class="eyebrow">WEEKLY LEFT</div><div class="weekly-value" id="u-left">--%</div></div><div class="track"><div class="fill" id="u-fill"></div></div><div class="weekly-meta"><span id="u-used">等待本地数据</span><span class="reset" id="u-reset"></span></div></div></div><div id="usage-empty">正在读取 GPT Usage 数据…</div><footer class="usage-footer"><span id="u-updated">--</span><span class="local">LOCAL ONLY</span></footer></section>
+<section id="music"><div class="music-aurora"></div><div class="music-noise"></div><div class="music-shell"><div class="album-wrap"><div class="album-glow"></div><div class="album-card" id="music-album"><span class="album-initial" id="music-initial">♪</span><img id="music-cover" alt="" draggable="false"></div><div class="album-vinyl"></div></div><div class="music-main"><div class="music-top"><span class="music-live"><i></i><span id="music-source">酷狗音乐</span></span><span id="music-playing">WAITING</span></div><div class="music-title" id="music-title">等待酷狗播放</div><div class="music-artist" id="music-artist">请在电脑上打开酷狗并播放歌曲</div><div class="music-lyrics"><div class="lyric prev" id="lyric-prev"><span class="lyric-text"></span></div><div class="lyric current" id="lyric-current"><span class="lyric-text">正在等待媒体会话</span></div><div class="lyric next" id="lyric-next"><span class="lyric-text"></span></div></div><div class="music-progress"><div class="progress-track" id="music-seek" role="slider" aria-label="歌曲进度"><div class="progress-fill" id="music-fill"><span class="progress-dot"></span></div></div><div class="music-times"><span id="music-now">0:00</span><span id="music-end">0:00</span></div></div><div class="music-controls"><button class="music-button" type="button" aria-label="上一首" onclick="musicCommand('previous')">◀</button><button class="music-button play" type="button" aria-label="播放或暂停" id="music-toggle" onclick="musicCommand('toggle')">▶</button><button class="music-button" type="button" aria-label="下一首" onclick="musicCommand('next')">▶</button><span class="music-status" id="music-status">正在连接酷狗…</span></div></div></div></section>
 <section id="pet"><div class="pet-grid"></div><div class="pet-halo"></div><div id="pet-clock"></div><div id="pet-bubble-zone"><div id="pet-bubble"></div></div><div id="pet-anchor" aria-label="月薪喵工作伙伴"><img id="miao" alt="月薪喵" draggable="false">
 <svg id="buddy" viewBox="0 0 320 430" xmlns="http://www.w3.org/2000/svg">
 <defs>
@@ -307,6 +348,17 @@ $('pet-transport').textContent=location.hostname==='127.0.0.1'?'USB':'WI-FI';
 function tick(){const d=new Date(),time=d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});$('clock').textContent=time;$('pet-clock').textContent=time;}tick();setInterval(tick,1000);
 function compact(n){n=Number(n||0);if(n>=1e9)return(n/1e9).toFixed(2)+'B';if(n>=1e6)return(n/1e6).toFixed(2)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return n.toLocaleString('en-US')}
 function renderUsage(u){$('usage-content').style.display=u?'block':'none';$('usage-empty').style.display=u?'none':'block';if(!u)return;$('u-total').textContent=compact(u.total);$('u-input').textContent=compact(u.input);$('u-output').textContent=compact(u.output);$('u-cache').textContent=compact(u.cached);$('u-partial').textContent=u.partial?'今天早期记录不完整':'';const left=u.hasWeekly?Number(u.remainingPercent):0;const accent=left>=50?'#4ade80':left>=20?'#fbbf24':'#fb7185';$('u-left').textContent=u.hasWeekly?left.toFixed(left%1?1:0)+'%':'--%';$('u-left').style.color=accent;$('u-fill').style.width=(u.hasWeekly?left:0)+'%';$('u-fill').style.background=accent;$('u-used').textContent=u.hasWeekly?Number(u.usedPercent).toFixed(u.usedPercent%1?1:0)+'% USED  |  '+String(u.plan||'CODEX').toUpperCase():'暂无周额度样本';$('u-reset').textContent=u.resetAt?'RESET '+new Date(u.resetAt).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'';$('u-updated').textContent='UPDATED '+new Date(u.generatedAt).toLocaleTimeString('zh-CN',{hour12:false})+'  |  EVERY 5S'}
+function timeText(ms,roundUp=false){ms=Math.max(0,Number(ms||0));const all=(roundUp?Math.ceil:Math.floor)(ms/1000),m=Math.floor(all/60),s=String(all%60).padStart(2,'0');return m+':'+s}
+let musicCoverVersion='',musicLyricKey='',latestMusicDuration=0,musicDragging=false,musicSeekPosition=0,musicSeekHold=0;
+function setMusicProgress(position,duration){position=Math.max(0,Number(position||0));duration=Math.max(0,Number(duration||0));const ratio=duration?Math.max(0,Math.min(100,position*100/duration)):0;$('music-fill').style.width=ratio+'%';$('music-now').textContent=timeText(position);$('music-end').textContent=timeText(duration,true);$('music-seek').setAttribute('aria-valuenow',String(Math.round(ratio)))}
+function lyricSpan(id){return $(id).querySelector('.lyric-text')}
+function resetLyricSpan(span){span.getAnimations().forEach(a=>a.cancel());span.style.transform='translateX(0px)'}
+function startLyricMarquee(remainingMs,scheduledKey){if(musicLyricKey!==scheduledKey)return;const box=$('lyric-current'),span=lyricSpan('lyric-current');resetLyricSpan(span);const overflow=Math.max(0,span.scrollWidth-box.clientWidth);if(overflow<5)return;const available=Math.max(1200,Number(remainingMs||3000)),hold=Math.min(520,Math.max(260,available*.12)),travelTime=Math.max(700,Math.min(overflow/108*1000,available-hold-260));span.animate([{transform:'translateX(0px)'},{transform:'translateX(-'+overflow+'px)'}],{duration:travelTime,delay:hold,fill:'forwards',easing:'linear'})}
+function renderLyrics(m){const previous=m.previousLyric||'',current=m.currentLyric||'正在读取歌词',next=m.nextLyric||'',key=String(m.title||'')+'\u001f'+current;if(key===musicLyricKey)return;const hadLyric=Boolean(musicLyricKey),previousSpan=lyricSpan('lyric-prev'),currentSpan=lyricSpan('lyric-current'),nextSpan=lyricSpan('lyric-next');[previousSpan,currentSpan,nextSpan].forEach(resetLyricSpan);const lyricAnimations=[$('lyric-prev'),$('lyric-current'),$('lyric-next')];lyricAnimations.forEach(el=>el.getAnimations().forEach(a=>a.cancel()));musicLyricKey=key;previousSpan.textContent=previous;currentSpan.textContent=current;nextSpan.textContent=next;void currentSpan.offsetWidth;if(hadLyric){$('lyric-prev').animate([{transform:'translate(6px,28px)',opacity:1},{transform:'translate(6px,0)',opacity:.36}],{duration:620,easing:'cubic-bezier(.2,.78,.2,1)'});$('lyric-current').animate([{transform:'translateY(30px)',opacity:.28},{transform:'translateY(0)',opacity:1}],{duration:660,easing:'cubic-bezier(.18,.82,.22,1)'});$('lyric-next').animate([{transform:'translate(6px,34px)',opacity:0},{transform:'translate(6px,0)',opacity:.36}],{duration:700,easing:'cubic-bezier(.18,.82,.22,1)'})}const wait=hadLyric?700:80,remaining=Math.max(1200,Number(m.currentLyricEndMs||0)-Number(m.positionMs||0)-wait),scheduledKey=key;setTimeout(()=>startLyricMarquee(remaining,scheduledKey),wait)}
+function renderMusic(m){if(!m)return;const accent=m.accent||'#8B5CF6',album=$('music-album'),cover=$('music-cover');latestMusicDuration=Number(m.durationMs||0);$('music').style.setProperty('--music-accent',accent);$('music-source').textContent=m.source||'酷狗音乐';$('music-playing').textContent=m.available?(m.isPlaying?'PLAYING':'PAUSED'):'WAITING';$('music-title').textContent=m.title||'等待酷狗播放';$('music-artist').textContent=[m.artist,m.album].filter(Boolean).join(' · ');renderLyrics(m);if(!musicDragging&&Date.now()>musicSeekHold){$('music-status').textContent=m.status||m.lyricSource||'';setMusicProgress(m.positionMs,m.durationMs)}const label=String(m.title||'♪').trim();$('music-initial').textContent=label?label.charAt(0).toUpperCase():'♪';album.style.background='linear-gradient(140deg,'+accent+',rgba(255,255,255,.10))';if(m.hasCover&&m.coverVersion){const version=String(m.coverVersion);if(musicCoverVersion!==version){musicCoverVersion=version;album.classList.remove('has-cover');cover.onload=()=>album.classList.add('has-cover');cover.onerror=()=>album.classList.remove('has-cover');cover.src='/music-cover?'+auth+'&v='+encodeURIComponent(version)}else album.classList.add('has-cover')}else{musicCoverVersion='';cover.removeAttribute('src');album.classList.remove('has-cover')}album.classList.toggle('playing',Boolean(m.isPlaying));$('music-toggle').textContent=m.isPlaying?'Ⅱ':'▶'}
+function previewMusicSeek(clientX){if(!latestMusicDuration)return;const rect=$('music-seek').getBoundingClientRect(),ratio=Math.max(0,Math.min(1,(clientX-rect.left)/rect.width));musicSeekPosition=Math.round(latestMusicDuration*ratio);setMusicProgress(musicSeekPosition,latestMusicDuration)}
+const musicSeek=$('music-seek');musicSeek.addEventListener('pointerdown',e=>{if(!latestMusicDuration)return;e.preventDefault();musicDragging=true;musicSeek.classList.add('dragging');musicSeek.setPointerCapture(e.pointerId);previewMusicSeek(e.clientX)});musicSeek.addEventListener('pointermove',e=>{if(musicDragging){e.preventDefault();previewMusicSeek(e.clientX)}});musicSeek.addEventListener('pointerup',async e=>{if(!musicDragging)return;e.preventDefault();previewMusicSeek(e.clientX);musicDragging=false;musicSeek.classList.remove('dragging');musicSeekHold=Date.now()+1200;$('music-status').textContent='正在跳转播放位置…';try{const r=await fetch('/api/music/seek?'+auth+'&positionMs='+musicSeekPosition,{method:'POST',cache:'no-store'});if(!r.ok)throw 0;$('music-status').textContent='播放位置已同步到酷狗'}catch(e){$('music-status').textContent='当前酷狗版本未接受进度跳转'}});musicSeek.addEventListener('pointercancel',()=>{musicDragging=false;musicSeek.classList.remove('dragging')});
+let musicBusy=false;async function musicCommand(command){if(musicBusy)return;musicBusy=true;$('music-status').textContent='正在发送控制指令…';try{const r=await fetch('/api/music/'+command+'?'+auth,{method:'POST',cache:'no-store'});if(!r.ok)throw 0;$('music-status').textContent='已发送给酷狗'}catch(e){$('music-status').textContent='酷狗暂未接受该控制'}finally{setTimeout(()=>musicBusy=false,450)}}
 function renderCustom(s){$('root').style.background=s.background;$('root').style.color=s.foreground;$('clock').style.display=s.showClock?'block':'none';$('title').textContent=s.title;$('title').style.display=s.title?'block':'none';$('message').textContent=s.message;$('message').style.fontSize=s.fontSize+'px';if(s.version===ver)return;const img=$('image-media');img.style.display='none';if(s.hasImage){img.src='/media?'+auth+'&v='+s.version;img.style.objectFit=s.imageFit;img.style.display='block';$('shade').style.display='block'}else{$('shade').style.display='none'}}
 const pet=$('pet'),petAnchor=$('pet-anchor'),petBubble=$('pet-bubble'),miao=$('miao');let bubbleTimer=0,poseTimer=0,pressTimer=0,lastTap=0,longPressed=false,dragging=false,startX=0,startY=0,downAt=0,dragX=0,dragY=0,manualUntil=0,partnerState='',lastActivity='',lastWorkBubble=0,lastUsageTotal=null,miaoMode='';
 function petVisible(){return pet.style.display==='flex'}
@@ -325,7 +377,7 @@ petAnchor.addEventListener('pointerdown',e=>{e.preventDefault();startX=e.clientX
 petAnchor.addEventListener('pointermove',e=>{if(!petAnchor.hasPointerCapture(e.pointerId))return;const dx=e.clientX-startX,dy=e.clientY-startY;if(!dragging&&Math.hypot(dx,dy)>9){dragging=true;clearTimeout(pressTimer);clearTimeout(poseTimer);manualUntil=Date.now()+5000;petAnchor.classList.remove('returning','working','joy','land');petAnchor.classList.add('dragging');setMiao('angry',true)}if(!dragging)return;dragX=Math.max(-82,Math.min(82,dx));dragY=Math.max(-52,Math.min(52,dy));petAnchor.style.setProperty('--drag-x',dragX+'px');petAnchor.style.setProperty('--drag-y',dragY+'px');petAnchor.style.setProperty('--tilt',Math.max(-7,Math.min(7,dx/12))+'deg');petAnchor.classList.toggle('drag-right',dx>3);petAnchor.classList.toggle('drag-left',dx<-3)});
 petAnchor.addEventListener('pointerup',e=>{e.preventDefault();clearTimeout(pressTimer);if(dragging){const quick=Date.now()-downAt<540&&Math.abs(dragX)>58;returnHome();if(quick)petSay('慢一点，我还要上班呢！',1500);return}if(longPressed)return;const now=Date.now();if(now-lastTap<420){lastTap=0;petReact('enjoy','今天也要开心打工！',2400,true)}else{lastTap=now;const rect=petAnchor.getBoundingClientRect(),head=(startY-rect.top)/rect.height<.6;setTimeout(()=>{if(lastTap===now){petReact(head?'comfort':'angry',head?'摸摸收到，继续努力。':'戳到我啦！',head?2800:1900);lastTap=0}},430)}});
 petAnchor.addEventListener('pointercancel',()=>{clearTimeout(pressTimer);if(dragging)returnHome()});
-async function sync(){try{const r=await fetch('/api/state?'+auth+'&x='+Date.now(),{cache:'no-store'});if(!r.ok)throw 0;const s=await r.json();lastOk=Date.now();$('offline').style.display='none';if(s.orientation!==lastOrientation){lastOrientation=s.orientation;if(window.BF66&&BF66.setOrientation)BF66.setOrientation(s.orientation)}const usageMode=s.mode==='usage',petMode=s.mode==='pet';$('usage').style.display=usageMode?'flex':'none';pet.style.display=petMode?'flex':'none';$('custom').style.display=!usageMode&&!petMode?'flex':'none';updatePartner(s.usage);if(usageMode)renderUsage(s.usage);else if(!petMode)renderCustom(s);ver=s.version}catch(e){if(Date.now()-lastOk>1500)$('offline').style.display='block'}finally{setTimeout(sync,350)}}sync();
+async function sync(){try{const r=await fetch('/api/state?'+auth+'&x='+Date.now(),{cache:'no-store'});if(!r.ok)throw 0;const s=await r.json();lastOk=Date.now();$('offline').style.display='none';if(s.orientation!==lastOrientation){lastOrientation=s.orientation;if(window.BF66&&BF66.setOrientation)BF66.setOrientation(s.orientation)}const usageMode=s.mode==='usage',petMode=s.mode==='pet',musicMode=s.mode==='music';$('usage').style.display=usageMode?'flex':'none';pet.style.display=petMode?'flex':'none';$('music').style.display=musicMode?'block':'none';$('custom').style.display=!usageMode&&!petMode&&!musicMode?'flex':'none';updatePartner(s.usage);if(usageMode)renderUsage(s.usage);else if(musicMode)renderMusic(s.music);else if(!petMode)renderCustom(s);ver=s.version}catch(e){if(Date.now()-lastOk>1500)$('offline').style.display='block'}finally{setTimeout(sync,350)}}sync();
 </script></body></html>
 """;
 }
@@ -408,6 +460,7 @@ internal sealed class MainForm : Form
     private readonly ComboBox _mode = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
     private readonly ComboBox _orientation = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 92 };
     private readonly CheckBox _clock = new() { Text = "显示时钟", Checked = true, AutoSize = true };
+    private readonly CheckBox _onlineLyrics = new() { Text = "允许在线匹配歌词（仅发送歌名、歌手和时长）", AutoSize = true, ForeColor = Color.FromArgb(70, 78, 92), Margin = new Padding(12, 8, 0, 0) };
     private readonly NumericUpDown _fontSize = new() { Minimum = 16, Maximum = 160, Value = 42, Width = 70 };
     private readonly ComboBox _fit = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 100 };
     private readonly Label _imageName = new() { Text = "未选择图片", AutoEllipsis = true, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
@@ -418,11 +471,13 @@ internal sealed class MainForm : Form
     private DisplayServer? _server;
     private readonly System.Windows.Forms.Timer _connectionTimer = new() { Interval = 5000 };
     private readonly System.Windows.Forms.Timer _usageTimer = new() { Interval = 5000 };
+    private readonly System.Windows.Forms.Timer _musicTimer = new() { Interval = 500 };
     private bool _checking;
     private bool _deviceOpened;
     private bool _usageRefreshing;
+    private bool _musicRefreshing;
 
-    public MainForm(bool startLandscape = false, string? startupImage = null)
+    public MainForm(bool startLandscape = false, string? startupImage = null, bool startMusic = false)
     {
         _token = ConnectionToken.LoadOrCreate();
         _adb = new AdbManager(_token);
@@ -435,10 +490,15 @@ internal sealed class MainForm : Form
 
         _fit.Items.AddRange(new object[] { "完整显示", "铺满裁剪" });
         _fit.SelectedIndex = 0;
-        _mode.Items.AddRange(new object[] { "自定义画面", "GPT Usage", "桌宠" });
+        _mode.Items.AddRange(new object[] { "自定义画面", "GPT Usage", "桌宠", "音乐播放器" });
         _mode.SelectedIndex = 1;
         _orientation.Items.AddRange(new object[] { "竖屏", "横屏" });
         _orientation.SelectedIndex = startLandscape ? 1 : 0;
+        if (startMusic)
+        {
+            _orientation.SelectedIndex = 1;
+            _mode.SelectedIndex = 3;
+        }
         if (!string.IsNullOrWhiteSpace(startupImage) && SupportedImage(startupImage))
         {
             _imagePath = startupImage;
@@ -482,6 +542,7 @@ internal sealed class MainForm : Form
         colors.Controls.Add(Button("文字颜色", (_, _) => ChooseColor(false)));
         colors.Controls.Add(Button("选择图片", (_, _) => ChooseImage()));
         colors.Controls.Add(Button("清除图片", (_, _) => { _imagePath = null; _imageName.Text = "未选择图片"; ApplyState(); }));
+        colors.Controls.Add(_onlineLyrics);
         layout.Controls.Add(colors);
 
         var imageRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(0, 8, 0, 8) };
@@ -511,12 +572,32 @@ internal sealed class MainForm : Form
         _clock.CheckedChanged += (_, _) => ApplyState();
         _fontSize.ValueChanged += (_, _) => ApplyState();
         _fit.SelectedIndexChanged += (_, _) => ApplyState();
-        _mode.SelectedIndexChanged += async (_, _) => { ApplyState(); if (_mode.SelectedIndex == 1) await RefreshUsageAsync(); };
-        _orientation.SelectedIndexChanged += (_, _) => ApplyState();
+        _onlineLyrics.CheckedChanged += async (_, _) =>
+        {
+            MusicReader.SetOnlineLyricsEnabled(_onlineLyrics.Checked);
+            if (_mode.SelectedIndex == 3) await RefreshMusicAsync();
+        };
+        _mode.SelectedIndexChanged += async (_, _) =>
+        {
+            if (_mode.SelectedIndex == 3 && _orientation.SelectedIndex != 1) _orientation.SelectedIndex = 1;
+            ApplyState();
+            if (_mode.SelectedIndex == 1) await RefreshUsageAsync();
+            if (_mode.SelectedIndex == 3) await RefreshMusicAsync();
+        };
+        _orientation.SelectedIndexChanged += (_, _) =>
+        {
+            if (_mode.SelectedIndex == 3 && _orientation.SelectedIndex != 1)
+            {
+                _orientation.SelectedIndex = 1;
+                return;
+            }
+            ApplyState();
+        };
         Load += OnLoaded;
         FormClosed += OnClosed;
         _connectionTimer.Tick += async (_, _) => await CheckConnectionAsync();
         _usageTimer.Tick += async (_, _) => await RefreshUsageAsync();
+        _musicTimer.Tick += async (_, _) => await RefreshMusicAsync();
     }
 
     private async void OnLoaded(object? sender, EventArgs e)
@@ -529,7 +610,9 @@ internal sealed class MainForm : Form
             _status.Text = "控制服务已启动，等待 BF66";
             _connectionTimer.Start();
             _usageTimer.Start();
+            _musicTimer.Start();
             await RefreshUsageAsync();
+            await RefreshMusicAsync();
             await CheckConnectionAsync();
         }
         catch (Exception ex) { _status.Text = "启动失败：" + ex.Message; }
@@ -539,14 +622,20 @@ internal sealed class MainForm : Form
     {
         _connectionTimer.Stop();
         _usageTimer.Stop();
+        _musicTimer.Stop();
         if (_server is not null) await _server.DisposeAsync();
     }
 
     private void ApplyState()
     {
-        var mode = _mode.SelectedIndex switch { 1 => "usage", 2 => "pet", _ => "custom" };
+        if (_mode.SelectedIndex == 3 && _orientation.SelectedIndex != 1)
+        {
+            _orientation.SelectedIndex = 1;
+            return;
+        }
+        var mode = _mode.SelectedIndex switch { 1 => "usage", 2 => "pet", 3 => "music", _ => "custom" };
         _store.Update(mode, _orientation.SelectedIndex == 1 ? "landscape" : "portrait", _title.Text, _message.Text, _background, _foreground, (int)_fontSize.Value, _clock.Checked, _fit.SelectedIndex == 1 ? "cover" : "contain", _imagePath);
-        _status.Text = "画面已更新";
+        _status.Text = mode == "music" ? "音乐播放器已切换为横屏" : "画面已更新";
     }
 
     private async Task RefreshUsageAsync()
@@ -565,6 +654,26 @@ internal sealed class MainForm : Form
             if (_mode.SelectedIndex == 1) _status.Text = "GPT Usage 读取失败：" + ex.Message;
         }
         finally { _usageRefreshing = false; }
+    }
+
+    private async Task RefreshMusicAsync()
+    {
+        if (_musicRefreshing) return;
+        _musicRefreshing = true;
+        try
+        {
+            var snapshot = await MusicReader.ReadAsync();
+            _store.UpdateMusic(snapshot);
+            if (_mode.SelectedIndex == 3)
+                _status.Text = snapshot.Available
+                    ? "酷狗同步中：" + snapshot.Title + " · " + snapshot.Artist
+                    : snapshot.Status;
+        }
+        catch (Exception ex)
+        {
+            if (_mode.SelectedIndex == 3) _status.Text = "音乐读取失败：" + ex.Message;
+        }
+        finally { _musicRefreshing = false; }
     }
 
     private async Task CheckConnectionAsync()
